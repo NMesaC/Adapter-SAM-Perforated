@@ -85,7 +85,7 @@ If you find our work useful in your research, please consider citing:
 
 @inproceedings{chen2023sam,
   title={Sam-adapter: Adapting segment anything in underperformed scenes},
-  author={Chen, Tianrun and Zhu, Lanyun and Deng, Chaotao and Cao, Runlong and Wang, Yan and Zhang, Shangzhan and Li, Zejian and Sun, Lingyun and Zang, Ying and Mao, Papa},
+  author={Chen, Tianrun and Zhu, Lanyun and Deng, Chaotao and Cao, Runlong and Wang, Yan and Li, Zejian and Sun, Lingyun and Zang, Ying and Mao, Papa},
   booktitle={Proceedings of the IEEE/CVF International Conference on Computer Vision},
   pages={3367--3375},
   year={2023}
@@ -104,7 +104,7 @@ If you find our work useful in your research, please consider citing:
 
 @misc{chen2023sam,
       title={SAM Fails to Segment Anything? -- SAM-Adapter: Adapting SAM in Underperformed Scenes: Camouflage, Shadow, and More}, 
-      author={Tianrun Chen and Lanyun Zhu and Chaotao Ding and Runlong Cao and Shangzhan Zhang and Yan Wang and Zejian Li and Lingyun Sun and Papa Mao and Ying Zang},
+      author={Tianrun Chen and Lanyun Zhu and Chaotao Ding and Runlong Cao and Yan Wang and Zejian Li and Lingyun Sun and Papa Mao and Ying Zang},
       year={2023},
       eprint={2304.09148},
       archivePrefix={arXiv},
