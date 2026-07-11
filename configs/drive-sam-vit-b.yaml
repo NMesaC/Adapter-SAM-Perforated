@@ -94,6 +94,7 @@ optimizer:
   name: adamw
   args:
     lr: 0.0002
+    weight_decay: 0
 lr_min: 1.0e-7
 epoch_max: 20
 

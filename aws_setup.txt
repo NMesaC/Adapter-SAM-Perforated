@@ -1,0 +1,23 @@
+git clone https://github.com/NMesaC/Adapter-SAM-Perforated.git
+
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh -b
+~/miniconda3/bin/conda init bash
+source ~/.bashrc
+
+conda create --name sam-adapter python=3.11
+conda activate sam-adapter
+
+pip install torch==1.13.0+cu116 torchvision==0.14.0+cu116 --extra-index-url https://download.pytorch.org/whl/cu116
+
+pip install -r requirements.txt
+pip install -U openmim
+mim install "mmcv-full>=1.1.4,<1.7.0"
+pip install wandb
+pip install perforatedai
+
+cd Adapter-SAM-Perforated
+mkdir -p pretrained
+
+wget -O pretrained/sam_vit_b_01ec64.pth https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+

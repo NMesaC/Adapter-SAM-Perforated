@@ -183,16 +183,27 @@ def main(config_, save_path, args):
             log('config wandb_enable=True but wandb is not installed; skipping wandb logging.')
     if wandb_active:
         # Dendrite restructure relaunches the process so use a stable id tied to save_path
-        # to reuse the same wandb runs
         wandb_run_id = os.path.basename(save_path.rstrip('/'))
-        wandb.init(
-            project=config.get('wandb_project', 'sam-adapter-drive'),
-            entity=config.get('wandb_entity') or None,
-            id=wandb_run_id,
-            resume='allow',
-            name=wandb_run_id,
-            config=config,
-        )
+        try:
+            wandb.init(
+                project=config.get('wandb_project', 'sam-adapter-drive'),
+                entity=config.get('wandb_entity') or None,
+                id=wandb_run_id,
+                resume='allow',
+                name=wandb_run_id,
+                config=config,
+            )
+        except Exception as e:
+            # The deterministic id can collide with a run that was deleted
+            # server-side (deleted ids can't be resumed/reused)
+            log(f'wandb.init failed to reuse run id "{wandb_run_id}" ({e}); '
+                'starting a new run with a fresh id instead.')
+            wandb.init(
+                project=config.get('wandb_project', 'sam-adapter-drive'),
+                entity=config.get('wandb_entity') or None,
+                name=wandb_run_id,
+                config=config,
+            )
 
     epoch_start = config.get('resume') + 1 if config.get('resume') is not None else 1
     model = models.make(config['model']).cuda()
