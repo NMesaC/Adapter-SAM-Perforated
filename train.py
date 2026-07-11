@@ -229,7 +229,13 @@ def main(config_, save_path, args):
 
     # Perforate the model
     if pai_active:
-        model = perforate_model(model, save_name=save_path,
+        # Fix the save name to work with wandb and PAI
+        pai_save_name = os.path.basename(save_path.rstrip('/'))
+        try:
+            os.symlink(os.path.abspath(save_path), pai_save_name)
+        except FileExistsError:
+            pass
+        model = perforate_model(model, save_name=pai_save_name,
                                  perforate_image_encoder=pai_perforate_image_encoder,
                                  perforate_adapter=pai_perforate_adapter,
                                  perforate_mask_decoder=pai_perforate_mask_decoder)
