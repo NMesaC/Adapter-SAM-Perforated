@@ -8,10 +8,17 @@ from tqdm import tqdm
 
 import datasets
 import models
+from models.sam import perforate_model
 import utils
 
 from torchvision import transforms
 from mmcv.runner import load_checkpoint
+
+try:
+    from perforatedai import utils_perforatedai as UPA
+    pai_available = True
+except ImportError:
+    pai_available = False
 
 
 def batched_predict(model, inp, coord, bsize):
@@ -58,6 +65,10 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None,
     elif eval_type == 'cod':
         metric_fn = utils.calc_cod
         metric1, metric2, metric3, metric4 = 'sm', 'em', 'wfm', 'mae'
+    elif eval_type == 'dice_iou':
+        # Metric used in the Medical-SAM paper
+        metric_fn = utils.calc_dice_iou
+        metric1, metric2, metric3, metric4 = 'dice', 'iou', 'none', 'none'
 
     val_metric1 = utils.Averager()
     val_metric2 = utils.Averager()
@@ -105,9 +116,26 @@ if __name__ == '__main__':
                         num_workers=8)
 
     model = models.make(config['model']).cuda()
-    sam_checkpoint = torch.load(args.model, map_location='cuda:0')
-    model.load_state_dict(sam_checkpoint, strict=True)
-    
+    if config.get('pai_enable', False):
+        if not pai_available:
+            raise ImportError('config pai_enable=True but perforatedai is not installed; '
+                               'cannot load a dendritic checkpoint.')
+        # Perforate the model then load from PAI checkpoints
+        ckpt_dir, ckpt_file = os.path.split(args.model)
+        ckpt_name = os.path.splitext(ckpt_file)[0]
+        model = perforate_model(
+            model,
+            save_name=ckpt_dir or '.',
+            perforate_image_encoder=config.get('pai_perforate_image_encoder', False),
+            perforate_adapter=config.get('pai_perforate_adapter', False),
+            perforate_mask_decoder=config.get('pai_perforate_mask_decoder', False)
+        )
+        model = UPA.load_system(model, ckpt_dir, ckpt_name, True)
+        model = model.cuda()
+    else:
+        sam_checkpoint = torch.load(args.model, map_location='cuda:0')
+        model.load_state_dict(sam_checkpoint, strict=True)
+
     metric1, metric2, metric3, metric4 = eval_psnr(loader, model,
                                                    data_norm=config.get('data_norm'),
                                                    eval_type=config.get('eval_type'),

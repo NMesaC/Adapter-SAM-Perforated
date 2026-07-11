@@ -148,6 +148,26 @@ def calc_cod(y_pred, y_true):
 
     return sm, em, wfm, mae
 
+# Medical-SAM Metric
+def calc_dice_iou(y_pred, y_true):
+    batchsize = y_true.shape[0]
+    with torch.no_grad():
+        assert y_pred.shape == y_true.shape
+        pred = (y_pred > 0.5).float()
+        gt = (y_true > 0.5).float()
+
+        dice, iou = 0, 0
+        for i in range(batchsize):
+            p = pred[i].flatten()
+            t = gt[i].flatten()
+            intersection = (p * t).sum()
+            union = p.sum() + t.sum() - intersection
+
+            dice += (2 * intersection + 1e-10) / (p.sum() + t.sum() + 1e-10)
+            iou += (intersection + 1e-10) / (union + 1e-10)
+
+    return dice / batchsize, iou / batchsize, np.array(0), np.array(0)
+
 
 from sklearn.metrics import precision_recall_curve
 

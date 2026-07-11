@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 
 import yaml
 from tqdm import tqdm
@@ -8,10 +9,26 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 
 import datasets
 import models
+from models.sam import perforate_model
 import utils
 from statistics import mean
 import torch
 import torch.distributed as dist
+
+# Attempt to import PerforatedAI
+try:
+    from perforatedai import globals_perforatedai as GPA
+    from perforatedai import utils_perforatedai as UPA
+    pai_available = True
+except ImportError:
+    pai_available = False
+
+# Attempt to import wandb
+try:
+    import wandb
+    wandb_available = True
+except ImportError:
+    wandb_available = False
 
 torch.distributed.init_process_group(backend='nccl')
 local_rank = torch.distributed.get_rank()
@@ -57,6 +74,10 @@ def eval_psnr(loader, model, eval_type=None):
     elif eval_type == 'cod':
         metric_fn = utils.calc_cod
         metric1, metric2, metric3, metric4 = 'sm', 'em', 'wfm', 'mae'
+    elif eval_type == 'dice_iou':
+        # Metric used in the Medical-SAM paper
+        metric_fn = utils.calc_dice_iou
+        metric1, metric2, metric3, metric4 = 'dice', 'iou', 'none', 'none'
 
     if local_rank == 0:
         pbar = tqdm(total=len(loader), leave=False, desc='val')
@@ -91,24 +112,6 @@ def eval_psnr(loader, model, eval_type=None):
     result1, result2, result3, result4 = metric_fn(pred_list, gt_list)
 
     return result1, result2, result3, result4, metric1, metric2, metric3, metric4
-
-
-def prepare_training():
-    if config.get('resume') is not None:
-        model = models.make(config['model']).cuda()
-        optimizer = utils.make_optimizer(
-            model.parameters(), config['optimizer'])
-        epoch_start = config.get('resume') + 1
-    else:
-        model = models.make(config['model']).cuda()
-        optimizer = utils.make_optimizer(
-            model.parameters(), config['optimizer'])
-        epoch_start = 1
-    max_epoch = config.get('epoch_max')
-    lr_scheduler = CosineAnnealingLR(optimizer, max_epoch, eta_min=config.get('lr_min'))
-    if local_rank == 0:
-        log('model: #params={}'.format(utils.compute_num_params(model, text=True)))
-    return model, optimizer, epoch_start, lr_scheduler
 
 
 def train(train_loader, model):
@@ -154,26 +157,100 @@ def main(config_, save_path, args):
             'gt': {'sub': [0], 'div': [1]}
         }
 
-    model, optimizer, epoch_start, lr_scheduler = prepare_training()
-    model.optimizer = optimizer
-    lr_scheduler = CosineAnnealingLR(model.optimizer, config['epoch_max'], eta_min=config.get('lr_min'))
+    # See if we can activate PAI
+    pai_perforate_image_encoder = config.get('pai_perforate_image_encoder', False)
+    pai_perforate_adapter       = config.get('pai_perforate_adapter', False)
+    pai_perforate_mask_decoder  = config.get('pai_perforate_mask_decoder', False)
+    pai_active                  = pai_available and config.get('pai_enable', False)
+    if config.get('pai_enable', False) and not pai_available:
+        if local_rank == 0:
+            log('config pai_enable=True but perforatedai is not installed; training without dendrites.')
+    if pai_active and not (pai_perforate_image_encoder or pai_perforate_adapter or pai_perforate_mask_decoder):
+        if local_rank == 0:
+            log('Warning: pai_enable=True but none of pai_perforate_image_encoder / '
+                'pai_perforate_adapter / pai_perforate_mask_decoder is set; nothing to '
+                'perforate, training without dendrites.')
+        pai_active = False
+    if pai_active and config.get('epoch_val') != 1:
+        if local_rank == 0:
+            log('Warning: pai_enable=True but epoch_val != 1; PAI only sees a validation '
+                'score on epochs where eval runs, so dendrite switch timing will be skewed.')
+
+    # See if we can activate wandb
+    wandb_active = wandb_available and config.get('wandb_enable', False) and local_rank == 0
+    if config.get('wandb_enable', False) and not wandb_available:
+        if local_rank == 0:
+            log('config wandb_enable=True but wandb is not installed; skipping wandb logging.')
+    if wandb_active:
+        # Dendrite restructure relaunches the process so use a stable id tied to save_path
+        # to reuse the same wandb runs
+        wandb_run_id = os.path.basename(save_path.rstrip('/'))
+        wandb.init(
+            project=config.get('wandb_project', 'sam-adapter-drive'),
+            entity=config.get('wandb_entity') or None,
+            id=wandb_run_id,
+            resume='allow',
+            name=wandb_run_id,
+            config=config,
+        )
+
+    epoch_start = config.get('resume') + 1 if config.get('resume') is not None else 1
+    model = models.make(config['model']).cuda()
+
+    # Load SAM Weights before Perforating
+    sam_checkpoint = torch.load(config['sam_checkpoint'], map_location='cuda:{}'.format(local_rank))
+    model.load_state_dict(sam_checkpoint, strict=False)
+
+    # Choose which modules are trained from the config
+    ft_image_encoder = config.get('ft_image_encoder', False)
+    ft_image_adapter = config.get('ft_image_adapter', True)
+    ft_mask_decoder  = config.get('ft_mask_decoder', True)
+    for name, para in model.named_parameters():
+        if "dendrite" in name:
+            # PAI dendrites always train
+            continue
+        if "image_encoder.prompt_generator" in name:
+            para.requires_grad_(ft_image_adapter)
+        elif "image_encoder" in name:
+            para.requires_grad_(ft_image_encoder)
+        elif "mask_decoder" in name:
+            para.requires_grad_(ft_mask_decoder)
+
+    # Perforate the model
+    if pai_active:
+        model = perforate_model(model, save_name=save_path,
+                                 perforate_image_encoder=pai_perforate_image_encoder,
+                                 perforate_adapter=pai_perforate_adapter,
+                                 perforate_mask_decoder=pai_perforate_mask_decoder)
+        if args.pai_load_folder is not None:
+            model = UPA.load_system(model, args.pai_load_folder, 'latest', True)
+            if local_rank == 0:
+                log('Loaded PAI dendrite structure and tracker state from {}/latest.pt'.format(
+                    args.pai_load_folder))
 
     model = model.cuda()
+
+    # Setup the PAI Optimizer + Scheduler
+    optimizer = utils.make_optimizer(model.parameters(), config['optimizer'])
+    if pai_active:
+        GPA.pai_tracker.set_optimizer_instance(optimizer)
+    model.optimizer = optimizer
+    lr_scheduler = CosineAnnealingLR(optimizer, config['epoch_max'], eta_min=config.get('lr_min'))
+
+    if local_rank == 0:
+        log('model: #params={}'.format(utils.compute_num_params(model, text=True)))
+
+    # DDP wrap is immediately unwrapped via `.module`, matching this repo's
+    # existing (pre-PAI) behavior; the raw module is what gets trained below.
     model = torch.nn.parallel.DistributedDataParallel(
         model,
-        device_ids=[args.local_rank],
-        output_device=args.local_rank,
+        device_ids=[local_rank],
+        output_device=local_rank,
         find_unused_parameters=True,
         broadcast_buffers=False
     )
     model = model.module
 
-    sam_checkpoint = torch.load(config['sam_checkpoint'])
-    model.load_state_dict(sam_checkpoint, strict=False)
-    
-    for name, para in model.named_parameters():
-        if "image_encoder" in name and "prompt_generator" not in name:
-            para.requires_grad_(False)
     if local_rank == 0:
         model_total_params = sum(p.numel() for p in model.parameters())
         model_grad_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -183,17 +260,26 @@ def main(config_, save_path, args):
     epoch_val = config.get('epoch_val')
     max_val_v = -1e18 if config['eval_type'] != 'ber' else 1e8
     timer = utils.Timer()
-    for epoch in range(epoch_start, epoch_max + 1):
+
+    epoch = epoch_start - 1
+    while pai_active or epoch < epoch_max:
+        epoch += 1
         train_loader.sampler.set_epoch(epoch)
         t_epoch_start = timer.t()
         train_loss_G = train(train_loader, model)
         lr_scheduler.step()
 
         if local_rank == 0:
-            log_info = ['epoch {}/{}'.format(epoch, epoch_max)]
+            log_info = ['epoch {}'.format(epoch) if pai_active else 'epoch {}/{}'.format(epoch, epoch_max)]
             writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
             log_info.append('train G: loss={:.4f}'.format(train_loss_G))
             writer.add_scalars('loss', {'train G': train_loss_G}, epoch)
+            if wandb_active:
+                wandb.log({
+                    'epoch': epoch,
+                    'lr': optimizer.param_groups[0]['lr'],
+                    'train_loss': train_loss_G,
+                }, step=epoch)
 
             model_spec = config['model']
             model_spec['sd'] = model.state_dict()
@@ -216,6 +302,14 @@ def main(config_, save_path, args):
                 log_info.append('val: {}={:.4f}'.format(metric4, result4))
                 writer.add_scalars(metric4, {'val': result4}, epoch)
 
+                if wandb_active:
+                    val_log = {'val_{}'.format(metric1): result1, 'val_{}'.format(metric2): result2}
+                    if metric3 != 'none':
+                        val_log['val_{}'.format(metric3)] = result3
+                    if metric4 != 'none':
+                        val_log['val_{}'.format(metric4)] = result4
+                    wandb.log(val_log, step=epoch)
+
                 if config['eval_type'] != 'ber':
                     if result1 > max_val_v:
                         max_val_v = result1
@@ -226,13 +320,50 @@ def main(config_, save_path, args):
                         save(config, model, save_path, 'best')
 
                 t = timer.t()
-                prog = (epoch - epoch_start + 1) / (epoch_max - epoch_start + 1)
+                prog = (epoch - epoch_start + 1) / max(epoch_max - epoch_start + 1, 1)
                 t_epoch = utils.time_text(t - t_epoch_start)
                 t_elapsed, t_all = utils.time_text(t), utils.time_text(t / prog)
                 log_info.append('{} {}/{}'.format(t_epoch, t_elapsed, t_all))
 
                 log(', '.join(log_info))
                 writer.flush()
+
+            # Track validation score via PAI
+            if pai_active:
+                model, restructured, training_complete = GPA.pai_tracker.add_validation_score(result1, model)
+                model = model.cuda()
+
+                # End training once PAI is done
+                if training_complete:
+                    if local_rank == 0:
+                        log('PAI training complete!')
+                        os.makedirs(save_path, exist_ok=True)
+                        with open(os.path.join(save_path, '.training_complete'), 'w') as f:
+                            f.write('complete')
+                        if wandb_active:
+                            wandb.finish()
+                    dist.barrier()
+                    dist.destroy_process_group()
+                    sys.exit(0)
+
+                # Dendrites need to be integrated
+                if restructured:
+                    if local_rank == 0:
+                        log('Dendrites restructured; exiting so the DDP process group can be '
+                            'rebuilt for the new architecture. Relaunch with --pai_load_folder '
+                            '{} to resume (train_distributed.sh does this automatically).'.format(save_path)
+                            )
+                    # New dendrites -> DDP + Optimizer are stale
+                    # train_distributed.sh handles restarts automatically
+                    # wandb.finish() is deliberately skipped here (not just
+                    # a normal process exit): the resumed process reuses
+                    # this same wandb run id, so leave it open to resume.
+                    dist.barrier()
+                    dist.destroy_process_group()
+                    sys.exit(0)
+
+    if wandb_active:
+        wandb.finish()
 
 
 def save(config, model, save_path, name):
@@ -254,6 +385,9 @@ if __name__ == '__main__':
     parser.add_argument('--name', default=None)
     parser.add_argument('--tag', default=None)
     parser.add_argument("--local_rank", type=int, default=-1, help="")
+    parser.add_argument('--pai_load_folder', type=str, default=None,
+                         help='Folder to load PAI dendrite/tracker state from (for resuming '
+                              'after a dendrite restructure exits the process).')
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:

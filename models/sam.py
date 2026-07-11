@@ -13,6 +13,100 @@ logger = logging.getLogger(__name__)
 from .iou_loss import IOU
 from typing import Any, Optional, Tuple
 
+# Attempt to import PerforatedAI
+try:
+    from perforatedai import globals_perforatedai as GPA
+    from perforatedai import utils_perforatedai as UPA
+    pai_available = True
+except ImportError:
+    pai_available = False
+
+
+def perforate_model(
+    model, 
+    save_name, 
+    perforate_image_encoder=False,
+    perforate_adapter=False, 
+    perforate_mask_decoder=False
+):
+    """
+    Configure PAI settings and apply perforation to the given model
+
+    Notes:
+        - N = Sequence length
+
+    Signature:
+        model (nn.Module):
+            - The SAM model to perforate
+        save_name (str):
+            - Directory PAI uses for its own tracker state and checkpoint saves
+        perforate_image_encoder (bool):
+            - Whether to grow dendrites on the ViT backbone (image_encoder.blocks)
+        perforate_adapter (bool):
+            - Whether to grow dendrites on the SAM-Adapter
+              (image_encoder.prompt_generator)
+        perforate_mask_decoder (bool):
+            - Whether to grow dendrites on the mask decoder
+    """
+    if not perforate_image_encoder and not perforate_adapter and not perforate_mask_decoder:
+        raise ValueError('perforate_model: at least one of perforate_image_encoder / '
+                          'perforate_adapter / perforate_mask_decoder must be True')
+
+    # Full training mode toggle
+    GPA.pc.set_testing_dendrite_capacity(False)
+
+    # Cap growth at 5 dendrites
+    GPA.pc.set_max_dendrites(5)
+
+    # Track what modules to perforate
+    GPA.pc.set_module_names_to_perforate(["Linear"])
+
+    # PAI tracks but doesn't perforate these submodules
+    # NOTE: ViT bacbkone and SAM-Adapter are tracked independently
+    module_ids_to_track = []
+    if not perforate_mask_decoder:
+        module_ids_to_track.append(".mask_decoder")
+    if not perforate_image_encoder and not perforate_adapter:
+        module_ids_to_track.append(".image_encoder")
+    elif not perforate_image_encoder:
+        module_ids_to_track.append(".image_encoder.blocks")
+    elif not perforate_adapter:
+        module_ids_to_track.append(".image_encoder.prompt_generator")
+    GPA.pc.set_module_ids_to_track(module_ids_to_track)
+
+    # Shape -> [B, N, C]
+    GPA.pc.set_output_dimensions([-1, -1, 0])
+
+    # Sets a 1% -> 0.1% improvement threshold
+    GPA.pc.set_improvement_threshold([0.01, 0.001, 0])
+
+    # Silence diagnostics
+    GPA.pc.set_unwrapped_modules_confirmed(True)
+
+    # Prevents crashes for trying to perforate a fully frozen module
+    GPA.pc.set_checked_skipped_modules(True)
+
+    # Perforate model
+    model = UPA.perforate_model(model, save_name=save_name, maximizing_score=True)
+
+    if perforate_mask_decoder:
+        # Shape -> [B, C] for output_hypernetworks_mlps[i] and iou_prediction_head
+        for mlp in model.mask_decoder.output_hypernetworks_mlps:
+            for layer in mlp.layers:
+                layer.set_this_output_dimensions([-1, 0])
+        for layer in model.mask_decoder.iou_prediction_head.layers:
+            layer.set_this_output_dimensions([-1, 0])
+
+    if perforate_image_encoder:
+        # Shape -> [B, H, W, C] for Image Encoder Block layers
+        for block in model.image_encoder.blocks:
+            block.attn.qkv.set_this_output_dimensions([-1, -1, -1, 0])
+            block.attn.proj.set_this_output_dimensions([-1, -1, -1, 0])
+            block.mlp.lin1.set_this_output_dimensions([-1, -1, -1, 0])
+            block.mlp.lin2.set_this_output_dimensions([-1, -1, -1, 0])
+
+    return model
+
 
 def init_weights(layer):
     if type(layer) == nn.Conv2d:
