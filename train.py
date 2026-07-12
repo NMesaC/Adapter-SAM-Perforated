@@ -241,6 +241,8 @@ def main(config_, save_path, args):
                                  perforate_mask_decoder=pai_perforate_mask_decoder)
         if args.pai_load_folder is not None:
             model = UPA.load_system(model, args.pai_load_folder, 'latest', True)
+            # Get the correct epoch to start from on resume
+            epoch_start = GPA.pai_tracker.member_vars['num_epochs_run'] + 1
             if local_rank == 0:
                 log('Loaded PAI dendrite structure and tracker state from {}/latest.pt'.format(
                     args.pai_load_folder))
