@@ -66,6 +66,9 @@ def perforate_model(
     module_ids_to_track = []
     if not perforate_mask_decoder:
         module_ids_to_track.append(".mask_decoder")
+    else:
+        # This module never receives gradient so we exclude it from PAI
+        module_ids_to_track.append(".mask_decoder.iou_prediction_head")
     if not perforate_image_encoder and not perforate_adapter:
         module_ids_to_track.append(".image_encoder")
     elif not perforate_image_encoder:
@@ -90,12 +93,10 @@ def perforate_model(
     model = UPA.perforate_model(model, save_name=save_name, maximizing_score=True)
 
     if perforate_mask_decoder:
-        # Shape -> [B, C] for output_hypernetworks_mlps[i] and iou_prediction_head
+        # Shape -> [B, C] for output_hypernetworks_mlps[i]
         for mlp in model.mask_decoder.output_hypernetworks_mlps:
             for layer in mlp.layers:
                 layer.set_this_output_dimensions([-1, 0])
-        for layer in model.mask_decoder.iou_prediction_head.layers:
-            layer.set_this_output_dimensions([-1, 0])
 
     if perforate_image_encoder:
         # Shape -> [B, H, W, C] for Image Encoder Block layers

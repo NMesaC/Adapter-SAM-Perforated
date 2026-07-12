@@ -21,3 +21,45 @@ mkdir -p pretrained
 
 wget -O pretrained/sam_vit_b_01ec64.pth https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
 
+# --- fix attempt 1: mmcv-full installed as 1.7.2, code requires <=1.7.0 ---
+pip uninstall -y mmcv-full mmcv
+pip install mmcv-full==1.6.2 -f https://download.openmmlab.com/mmcv/dist/cu116/torch1.13.0/index.html
+# useless: no 1.6.2 wheel exists for cu116/torch1.13.0/py3.9 -> falls back to source build -> fails (missing pkg_resources)
+
+# --- fix attempt 2: use 1.7.0, the max version the code allows, which HAS a prebuilt cp39 wheel ---
+pip install mmcv-full==1.7.0 -f https://download.openmmlab.com/mmcv/dist/cu116/torch1.13.0/index.html
+# side effect: pulled in numpy 2.0.2, but torch/torchvision here are built against numpy 1.x -> "Numpy is not available"
+
+# --- fix attempt 3: repin numpy to the version requirements.txt actually specifies ---
+pip install "numpy==1.20.3"
+# side effect: scipy (bumped by mim/mmcv earlier) now needs numpy>=1.22.4 -> ImportError in scipy.ndimage
+# root cause: mim/mmcv install drifts numpy/scipy away from requirements.txt pins; re-apply requirements.txt LAST to win
+
+# --- fix attempt 4: reapply requirements.txt after mmcv/mim so its pins (numpy, scipy, etc.) take precedence ---
+pip install -r requirements.txt
+# useless: requirements.txt pins torch~=1.13.0+cu116 / torchvision~=0.14.0+cu116 -> `~=` can't be used with a
+# local version label (+cu116) -> hard parse error, pip never gets to installing anything
+
+# --- fix attempt 5: reapply requirements.txt EXCLUDING torch/torchvision (already installed correctly above) ---
+grep -v -E '^(torch|torchvision)~=' requirements.txt > /tmp/requirements_no_torch.txt
+pip install -r /tmp/requirements_no_torch.txt
+# useless: requirements.txt's own numpy~=1.20.3 pin (<1.21.0) contradicts its onnxruntime~=1.14.1 pin (needs numpy>=1.21.6)
+# -> ResolutionImpossible. numpy==1.20.3 was never actually valid for the rest of this file.
+
+# --- fix attempt 6: drop the numpy pin too, let the resolver pick a version <2 that satisfies scipy/onnxruntime/opencv together ---
+grep -v -E '^(torch|torchvision|numpy)~=' requirements.txt > /tmp/requirements_no_torch_numpy.txt
+pip install -r /tmp/requirements_no_torch_numpy.txt "numpy<2"
+# useless: matplotlib~=3.1.2 (from 2019) has no prebuilt wheel for cp39 -> source build -> needs FreeType dev headers
+# (ft2build.h) not installed on this box -> gcc compile error
+
+# --- fix attempt 7: also drop the ancient matplotlib pin, let pip grab a modern prebuilt wheel instead ---
+grep -v -E '^(torch|torchvision|numpy|matplotlib)~=' requirements.txt > /tmp/requirements_trimmed.txt
+pip install -r /tmp/requirements_trimmed.txt "numpy<2" "matplotlib"
+# progress: packages now import fine, but DataLoader crashes on first batch: "Pin memory thread exited unexpectedly"
+# (EOFError/Bad file descriptor in resource_sharer). /dev/shm=31G and ulimit -n=8192 are both fine, so this isn't
+# a shared-memory/fd exhaustion issue -> a worker process (num_workers=8, train.py:52) is likely crashing silently
+# and multiprocessing is masking the real exception.
+
+# --- diagnostic: force num_workers=0 so any real worker-process exception surfaces directly instead of being masked ---
+sed -i 's/num_workers=8/num_workers=0/' train.py
+
