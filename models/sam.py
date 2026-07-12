@@ -80,8 +80,8 @@ def perforate_model(
     # Shape -> [B, N, C]
     GPA.pc.set_output_dimensions([-1, -1, 0])
 
-    # Sets a 1% -> 0.1% improvement threshold
-    GPA.pc.set_improvement_threshold([0.01, 0.001, 0])
+    # Sets a 0.5% -> 0.1% improvement threshold
+    GPA.pc.set_improvement_threshold([0.005, 0.001, 0])
 
     # Silence diagnostics
     GPA.pc.set_unwrapped_modules_confirmed(True)

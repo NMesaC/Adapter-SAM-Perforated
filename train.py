@@ -5,7 +5,7 @@ import sys
 import yaml
 from tqdm import tqdm
 from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 import datasets
 import models
@@ -254,7 +254,13 @@ def main(config_, save_path, args):
     if pai_active:
         GPA.pai_tracker.set_optimizer_instance(optimizer)
     model.optimizer = optimizer
-    lr_scheduler = CosineAnnealingLR(optimizer, config['epoch_max'], eta_min=config.get('lr_min'))
+    lr_scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode='max',
+        factor=config.get('lr_factor', 0.5),
+        patience=config.get('lr_patience', 3),
+        min_lr=config.get('lr_min', 0),
+    )
 
     if local_rank == 0:
         log('model: #params={}'.format(utils.compute_num_params(model, text=True)))
@@ -286,7 +292,6 @@ def main(config_, save_path, args):
         train_loader.sampler.set_epoch(epoch)
         t_epoch_start = timer.t()
         train_loss_G = train(train_loader, model)
-        lr_scheduler.step()
 
         if local_rank == 0:
             log_info = ['epoch {}'.format(epoch) if pai_active else 'epoch {}/{}'.format(epoch, epoch_max)]
@@ -310,6 +315,7 @@ def main(config_, save_path, args):
         if (epoch_val is not None) and (epoch % epoch_val == 0):
             result1, result2, result3, result4, metric1, metric2, metric3, metric4 = eval_psnr(val_loader, model,
                 eval_type=config.get('eval_type'))
+            lr_scheduler.step(result1)
 
             if local_rank == 0:
                 log_info.append('val: {}={:.4f}'.format(metric1, result1))
