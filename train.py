@@ -262,6 +262,19 @@ def main(config_, save_path, args):
         min_lr=config.get('lr_min', 0),
     )
 
+    # PAI's own checkpoint never persists the optimizer/scheduler (they're
+    # excluded as live objects in utils_perforatedai.save_net_vars), so
+    # without this the LR resets to config['optimizer']['args']['lr'] and
+    # ReduceLROnPlateau forgets its patience counter on every restart.
+    if args.pai_load_folder is not None:
+        opt_sched_path = os.path.join(args.pai_load_folder, 'opt_sched_state.pt')
+        if os.path.exists(opt_sched_path):
+            opt_sched_state = torch.load(opt_sched_path, map_location='cuda:{}'.format(local_rank))
+            optimizer.load_state_dict(opt_sched_state['optimizer'])
+            lr_scheduler.load_state_dict(opt_sched_state['scheduler'])
+            if local_rank == 0:
+                log('Loaded optimizer/scheduler state from {}'.format(opt_sched_path))
+
     if local_rank == 0:
         log('model: #params={}'.format(utils.compute_num_params(model, text=True)))
 
@@ -318,6 +331,11 @@ def main(config_, save_path, args):
             lr_scheduler.step(result1)
 
             if local_rank == 0:
+                torch.save({
+                    'optimizer': optimizer.state_dict(),
+                    'scheduler': lr_scheduler.state_dict(),
+                }, os.path.join(save_path, 'opt_sched_state.pt'))
+
                 log_info.append('val: {}={:.4f}'.format(metric1, result1))
                 writer.add_scalars(metric1, {'val': result1}, epoch)
                 log_info.append('val: {}={:.4f}'.format(metric2, result2))
